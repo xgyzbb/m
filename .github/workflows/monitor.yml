@@ -53,9 +53,12 @@ jobs:
           S2_MIN_AMOUNT: ${{ secrets.S2_MIN_AMOUNT }}
           S3_PAGE: ${{ secrets.S3_PAGE }}
           S3_MIN_AMOUNT: ${{ secrets.S3_MIN_AMOUNT }}
+          S4_PAGE: ${{ secrets.S4_PAGE }}
+          S4_MIN_AMOUNT: ${{ secrets.S4_MIN_AMOUNT }}
           S1_LABEL: ${{ secrets.S1_LABEL }}
           S2_LABEL: ${{ secrets.S2_LABEL }}
           S3_LABEL: ${{ secrets.S3_LABEL }}
+          S4_LABEL: ${{ secrets.S4_LABEL }}
           FORCE_SEND_INPUT: ${{ github.event.inputs.force_send == 'true' && '1' || '0' }}
           ONCE_INPUT: ${{ github.event.inputs.once == 'true' && '1' || '0' }}
         run: |
