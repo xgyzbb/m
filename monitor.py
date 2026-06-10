@@ -50,15 +50,31 @@ UA = (
 )
 TIMEOUT = 25
 
+
+def _int_env(name: str, default: int) -> int:
+    """读取整数环境变量；未设置/为空字符串(常见于未配置的 GitHub Secret)时回退默认值。"""
+    try:
+        return int(os.getenv(name, "") or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _float_env(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, "") or default)
+    except (TypeError, ValueError):
+        return default
+
+
 S1_API = os.getenv("S1_API", "")
 S1_PAGE = os.getenv("S1_PAGE", "")
 S2_PAGE = os.getenv("S2_PAGE", "")
 S2_CATEGORY = os.getenv("S2_CATEGORY", "")
-S2_MIN_AMOUNT = int(os.getenv("S2_MIN_AMOUNT", "10000"))
+S2_MIN_AMOUNT = _int_env("S2_MIN_AMOUNT", 10000)
 S3_PAGE = os.getenv("S3_PAGE", "")
-S3_MIN_AMOUNT = int(os.getenv("S3_MIN_AMOUNT", "10000"))
+S3_MIN_AMOUNT = _int_env("S3_MIN_AMOUNT", 10000)
 S4_PAGE = os.getenv("S4_PAGE", "")
-S4_MIN_AMOUNT = int(os.getenv("S4_MIN_AMOUNT", "10000"))
+S4_MIN_AMOUNT = _int_env("S4_MIN_AMOUNT", 10000)
 S1_LABEL = os.getenv("S1_LABEL", "站点1")
 S2_LABEL = os.getenv("S2_LABEL", "站点2")
 S3_LABEL = os.getenv("S3_LABEL", "站点3")
@@ -73,8 +89,8 @@ TZ_AUTOBUY = os.getenv("TZ_AUTOBUY", "") == "1"
 TZ_BUYER_EMAIL = os.getenv("TZ_BUYER_EMAIL", "")
 TZ_ORDER_PASSWORD = os.getenv("TZ_ORDER_PASSWORD", "")
 TZ_PAYMENT_CHANNEL = os.getenv("TZ_PAYMENT_CHANNEL", "")
-TZ_AUTOBUY_QTY = int(os.getenv("TZ_AUTOBUY_QTY", "1"))
-TZ_MAX_PRICE = float(os.getenv("TZ_MAX_PRICE", "0") or "0")  # 0 = 不限价
+TZ_AUTOBUY_QTY = _int_env("TZ_AUTOBUY_QTY", 1)
+TZ_MAX_PRICE = _float_env("TZ_MAX_PRICE", 0.0)  # 0 = 不限价
 
 AMOUNT_RE = re.compile(r"(\d[\d,]*)\s*NGN", re.I)
 # 站点3：单选项 input + 对应 label（label 文本形如 "10000 ngn"；input 含 disabled 即售罄）
