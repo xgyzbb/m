@@ -4,13 +4,14 @@
 
 站点1：商品 JSON API —— 任一规格有货即提醒。
 站点2：页面内嵌商品 JSON —— 面额 >= 阈值 的单品『有货』即提醒（忽略套餐 bundle）。
-两站均按『售罄→有货』去重：有货才报一次，持续有货不重复；无命中静默不发。
+站点3：服务端渲染页面的单选项 —— 面额 >= 阈值 的选项『有货』（无 disabled）即提醒。
+各站均按『售罄→有货』去重：有货才报一次，持续有货不重复；无命中静默不发。
 某站点抓取失败则跳过且不改写其状态（不误报）。
 
 环境变量：
   邮件：SMTP_HOST SMTP_PORT SMTP_USER SMTP_PASSWORD EMAIL_FROM EMAIL_TO [SMTP_USE_SSL]
-  目标：S1_API S1_PAGE S2_PAGE S2_CATEGORY [S2_MIN_AMOUNT=10000]
-  标签：[S1_LABEL=站点1] [S2_LABEL=站点2]
+  目标：S1_API S1_PAGE S2_PAGE S2_CATEGORY [S2_MIN_AMOUNT=10000] S3_PAGE [S3_MIN_AMOUNT=10000]
+  标签：[S1_LABEL=站点1] [S2_LABEL=站点2] [S3_LABEL=站点3]
   调试：FORCE_SEND=1（无命中也发一封测试邮件）
 """
 from __future__ import annotations
@@ -49,10 +50,16 @@ S1_PAGE = os.getenv("S1_PAGE", "")
 S2_PAGE = os.getenv("S2_PAGE", "")
 S2_CATEGORY = os.getenv("S2_CATEGORY", "")
 S2_MIN_AMOUNT = int(os.getenv("S2_MIN_AMOUNT", "10000"))
+S3_PAGE = os.getenv("S3_PAGE", "")
+S3_MIN_AMOUNT = int(os.getenv("S3_MIN_AMOUNT", "10000"))
 S1_LABEL = os.getenv("S1_LABEL", "站点1")
 S2_LABEL = os.getenv("S2_LABEL", "站点2")
+S3_LABEL = os.getenv("S3_LABEL", "站点3")
 
 AMOUNT_RE = re.compile(r"(\d[\d,]*)\s*NGN", re.I)
+# 站点3：单选项 input + 对应 label（label 文本形如 "10000 ngn"；input 含 disabled 即售罄）
+S3_INPUT_RE = re.compile(r'<input[^>]*?id="CheckedOption_(\d+)"[^>]*>', re.I)
+S3_LABEL_RE = re.compile(r'<label\s+for="CheckedOption_(\d+)"[^>]*>\s*(\d[\d\s,]*)\s*NGN', re.I)
 
 logger = logging.getLogger("monitor")
 
@@ -159,6 +166,33 @@ def check_s2(prev_in_stock: list[int]) -> tuple[list[dict], list[int]]:
     return new_alerts, sorted(instock.keys())
 
 
+# ---------- 站点 3（服务端渲染单选项：>=阈值 有货）----------
+def check_s3(prev_in_stock: list[int]) -> tuple[list[dict], list[int]]:
+    """返回 (新有货的 >=阈值 选项告警, 当前有货的 >=阈值 选项 id 列表)。抓取/解析失败抛异常。"""
+    r = requests.get(S3_PAGE, headers={"User-Agent": UA}, timeout=TIMEOUT)
+    r.raise_for_status()
+    html = r.text
+    disabled: dict[int, bool] = {}
+    for m in S3_INPUT_RE.finditer(html):
+        disabled[int(m.group(1))] = "disabled" in m.group(0).lower()
+    amounts: dict[int, int] = {
+        int(m.group(1)): int(re.sub(r"[\s,]", "", m.group(2)))
+        for m in S3_LABEL_RE.finditer(html)
+    }
+    if not amounts:
+        raise RuntimeError("站点3未解析到任何面额选项（页面结构可能已变化）")
+    instock: dict[int, dict] = {}
+    for oid, amount in amounts.items():
+        if amount < S3_MIN_AMOUNT:
+            continue
+        if disabled.get(oid, True):  # 找不到对应 input 时按售罄处理，避免误报
+            continue
+        instock[oid] = {"name": f"{amount} NGN", "amount": amount}
+    prev = set(prev_in_stock or [])
+    new_alerts = [{"id": i, **v} for i, v in instock.items() if i not in prev]
+    return new_alerts, sorted(instock.keys())
+
+
 # ---------- 邮件 ----------
 def _smtp_ready() -> bool:
     return bool(os.getenv("SMTP_HOST") and os.getenv("SMTP_USER") and os.getenv("EMAIL_TO"))
@@ -202,13 +236,18 @@ def send_email(subject: str, html_body: str, text_body: str) -> bool:
                 pass
 
 
-def build_email(s1_alerts: list[dict], s2_alerts: list[dict]) -> tuple[str, str, str]:
-    n1, n2 = len(s1_alerts), len(s2_alerts)
+def build_email(
+    s1_alerts: list[dict], s2_alerts: list[dict], s3_alerts: list[dict] | None = None
+) -> tuple[str, str, str]:
+    s3_alerts = s3_alerts or []
+    n1, n2, n3 = len(s1_alerts), len(s2_alerts), len(s3_alerts)
     subj_bits = []
     if n1:
         subj_bits.append(f"{S1_LABEL} {n1} 个规格有货")
     if n2:
         subj_bits.append(f"{S2_LABEL} {n2} 个≥{S2_MIN_AMOUNT}有货")
+    if n3:
+        subj_bits.append(f"{S3_LABEL} {n3} 个≥{S3_MIN_AMOUNT}有货")
     subject = "【库存提醒】" + " / ".join(subj_bits)
 
     th, hh = [], []
@@ -246,6 +285,22 @@ def build_email(s1_alerts: list[dict], s2_alerts: list[dict]) -> tuple[str, str,
         th += [f"  - {a['name']}  面额 {a['amount']} NGN  库存 {a['count']}" for a in s2_alerts]
         if S2_PAGE:
             th.append(f"  页面：{S2_PAGE}")
+    if n3:
+        rows = "".join(
+            f"<tr><td>{a['name']}</td><td style='text-align:right'>{a['amount']} NGN</td></tr>"
+            for a in s3_alerts
+        )
+        hh.append(
+            f"<h3>■ {S3_LABEL}（≥{S3_MIN_AMOUNT} NGN 选项有货）</h3>"
+            "<table border='1' cellpadding='6' cellspacing='0' style='border-collapse:collapse'>"
+            "<tr><th>选项</th><th>面额</th></tr>"
+            f"{rows}</table>"
+            + (f"<p>下单页：<a href='{S3_PAGE}'>{S3_PAGE}</a></p>" if S3_PAGE else "")
+        )
+        th.append(f"■ {S3_LABEL}（≥{S3_MIN_AMOUNT} NGN 选项有货）：")
+        th += [f"  - {a['name']}  面额 {a['amount']} NGN" for a in s3_alerts]
+        if S3_PAGE:
+            th.append(f"  下单页：{S3_PAGE}")
 
     now = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S")
     th.append(f"\n（检测时间 {now}）")
@@ -285,8 +340,21 @@ def main() -> int:
     except Exception as e:  # noqa: BLE001
         logger.error("站点2抓取失败，跳过：%s", e)
 
-    if s1_alerts or s2_alerts:
-        subject, html_body, text_body = build_email(s1_alerts, s2_alerts)
+    s3_alerts: list[dict] = []
+    s3_now = state.get("s3_in_stock", [])
+    s3_ok = False
+    if S3_PAGE:
+        try:
+            s3_alerts, s3_now = check_s3(state.get("s3_in_stock", []))
+            s3_ok = True
+            logger.info(
+                "站点3：当前≥%d有货 %d 个，新有货 %d 个", S3_MIN_AMOUNT, len(s3_now), len(s3_alerts)
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.error("站点3抓取失败，跳过：%s", e)
+
+    if s1_alerts or s2_alerts or s3_alerts:
+        subject, html_body, text_body = build_email(s1_alerts, s2_alerts, s3_alerts)
         send_email(subject, html_body, text_body)
     elif os.getenv("FORCE_SEND") == "1":
         logger.info("FORCE_SEND=1：发送一封测试邮件")
@@ -302,6 +370,8 @@ def main() -> int:
         state["s1_in_stock"] = s1_now
     if s2_ok:
         state["s2_in_stock"] = s2_now
+    if s3_ok:
+        state["s3_in_stock"] = s3_now
     # 清理旧键/易变字段，保持 state.json 稳定（存活性看 Actions 运行记录）
     for k in ("last_run_utc", "tz_in_stock", "seagm_seen_single_ids"):
         state.pop(k, None)
