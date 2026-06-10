@@ -11,10 +11,13 @@
 
 环境变量：
   邮件：SMTP_HOST SMTP_PORT SMTP_USER SMTP_PASSWORD EMAIL_FROM EMAIL_TO [SMTP_USE_SSL]
+  Telegram(档位①推送)：TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID
   目标：S1_API S1_PAGE S2_PAGE S2_CATEGORY [S2_MIN_AMOUNT=10000] S3_PAGE [S3_MIN_AMOUNT=10000]
         S4_PAGE [S4_MIN_AMOUNT=10000]
   标签：[S1_LABEL=站点1] [S2_LABEL=站点2] [S3_LABEL=站点3] [S4_LABEL=站点4]
-  调试：FORCE_SEND=1（无命中也发一封测试邮件）
+  档位②(桃子商店自动建单，默认关闭)：TZ_AUTOBUY=1 TZ_BUYER_EMAIL TZ_ORDER_PASSWORD
+        [TZ_PAYMENT_CHANNEL] [TZ_AUTOBUY_QTY=1] [TZ_MAX_PRICE=0(不限)]
+  调试：FORCE_SEND=1（无命中也发一封测试邮件/推送）
 """
 from __future__ import annotations
 
@@ -60,6 +63,18 @@ S1_LABEL = os.getenv("S1_LABEL", "站点1")
 S2_LABEL = os.getenv("S2_LABEL", "站点2")
 S3_LABEL = os.getenv("S3_LABEL", "站点3")
 S4_LABEL = os.getenv("S4_LABEL", "站点4")
+
+# Telegram 推送（档位①）
+TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TG_CHAT = os.getenv("TELEGRAM_CHAT_ID", "")
+
+# 桃子商店自动建单（档位②，默认关闭，需显式开启 + 填邮箱/订单密码）
+TZ_AUTOBUY = os.getenv("TZ_AUTOBUY", "") == "1"
+TZ_BUYER_EMAIL = os.getenv("TZ_BUYER_EMAIL", "")
+TZ_ORDER_PASSWORD = os.getenv("TZ_ORDER_PASSWORD", "")
+TZ_PAYMENT_CHANNEL = os.getenv("TZ_PAYMENT_CHANNEL", "")
+TZ_AUTOBUY_QTY = int(os.getenv("TZ_AUTOBUY_QTY", "1"))
+TZ_MAX_PRICE = float(os.getenv("TZ_MAX_PRICE", "0") or "0")  # 0 = 不限价
 
 AMOUNT_RE = re.compile(r"(\d[\d,]*)\s*NGN", re.I)
 # 站点3：单选项 input + 对应 label（label 文本形如 "10000 ngn"；input 含 disabled 即售罄）
@@ -108,6 +123,7 @@ def check_s1(prev_in_stock: list[str]) -> tuple[list[dict], list[str]]:
             now.append(code)
             sv = s.get("spec_values") or {}
             detail[code] = {
+                "sku_id": s.get("id"),
                 "spec": sv.get("zh-CN") or sv.get("en-US") or code,
                 "price": s.get("price_amount"),
                 "qty": max(auto, up, manual),
@@ -211,6 +227,110 @@ def check_s4(prev_present: list[int]) -> tuple[list[dict], list[int]]:
     prev = set(prev_present or [])
     new_alerts = [{"name": f"{a} NGN", "amount": a} for a in present if a not in prev]
     return new_alerts, present
+
+
+# ---------- Telegram 推送（档位①）----------
+def notify_telegram(text: str) -> bool:
+    """纯文本发送（不用 parse_mode，URL 由 Telegram 自动识别为链接，避免转义出错）。"""
+    if not (TG_TOKEN and TG_CHAT):
+        logger.info("未配置 Telegram，跳过推送")
+        return False
+    try:
+        r = requests.post(
+            f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+            json={"chat_id": TG_CHAT, "text": text, "disable_web_page_preview": True},
+            timeout=TIMEOUT,
+        )
+        if r.ok and (r.json() or {}).get("ok"):
+            logger.info("Telegram 已推送")
+            return True
+        logger.error("Telegram 推送失败：%s", r.text[:200])
+        return False
+    except Exception as e:  # noqa: BLE001
+        logger.error("Telegram 推送异常：%s", e)
+        return False
+
+
+def build_telegram(
+    s1: list[dict], s2: list[dict], s3: list[dict], s4: list[dict], extra_notes=None
+) -> str:
+    L = ["🚨 库存提醒"]
+    if s1:
+        L.append(f"\n■ {S1_LABEL}（有货）")
+        L += [f"• {a['spec']}  价{a['price']}  可购{a['qty']}" for a in s1]
+        if S1_PAGE:
+            L.append(f"下单：{S1_PAGE}")
+    if s2:
+        L.append(f"\n■ {S2_LABEL}（≥{S2_MIN_AMOUNT} 有货）")
+        L += [f"• {a['name']}  库存{a['count']}" for a in s2]
+        if S2_PAGE:
+            L.append(f"下单：{S2_PAGE}")
+    if s3:
+        L.append(f"\n■ {S3_LABEL}（≥{S3_MIN_AMOUNT} 有货）")
+        L += [f"• {a['name']}" for a in s3]
+        if S3_PAGE:
+            L.append(f"下单：{S3_PAGE}")
+    if s4:
+        L.append(f"\n■ {S4_LABEL}（出现 ≥{S4_MIN_AMOUNT}）")
+        L += [f"• {a['amount']} NGN" for a in s4]
+        if S4_PAGE:
+            L.append(f"查看：{S4_PAGE}")
+    for n in extra_notes or []:
+        L.append("\n" + n)
+    return "\n".join(L)
+
+
+# ---------- 桃子商店自动建单（档位②，不自动付款）----------
+def tz_autobuy(alert: dict) -> str:
+    """对一个有货的桃子商店 SKU 自动建单并取回付款链接（不自动付款）。
+    返回一条中文结果说明；任何失败都只返回说明、不抛异常，确保不影响其它通知。
+    注意：create-and-pay 的请求/响应字段在缺货期无法实测，首次真实命中可能需要微调。
+    """
+    sku_id = alert.get("sku_id")
+    if not (TZ_BUYER_EMAIL and TZ_ORDER_PASSWORD and sku_id):
+        return "⚠️ 档位②未就绪（缺邮箱/订单密码），仅提醒，请手动下单。"
+    base = S1_API.split("/public/")[0]
+    h = {"User-Agent": UA, "Content-Type": "application/json"}
+    payload = {
+        "email": TZ_BUYER_EMAIL,
+        "order_password": TZ_ORDER_PASSWORD,
+        "items": [{"sku_id": sku_id, "quantity": TZ_AUTOBUY_QTY}],
+    }
+    try:
+        pv = requests.post(base + "/guest/orders/preview", json=payload, headers=h, timeout=TIMEOUT).json()
+    except Exception as e:  # noqa: BLE001
+        return f"⚠️ 自动建单·预览异常：{e}（请手动下单）"
+    if pv.get("status_code") != 0:
+        return f"⚠️ 自动建单·预览失败：{pv.get('msg')}（请手动下单）"
+    d = pv.get("data") or {}
+    total = d.get("total_amount") or d.get("pay_amount") or d.get("amount") or alert.get("price")
+    try:
+        if TZ_MAX_PRICE and total and float(total) > TZ_MAX_PRICE:
+            return f"⏸️ 自动建单已跳过：金额 {total} > 上限 {TZ_MAX_PRICE}（请手动判断）"
+    except Exception:  # noqa: BLE001
+        pass
+    body = dict(payload)
+    if TZ_PAYMENT_CHANNEL:
+        body["payment_channel"] = TZ_PAYMENT_CHANNEL
+    try:
+        cp = requests.post(
+            base + "/guest/orders/create-and-pay", json=body, headers=h, timeout=TIMEOUT
+        ).json()
+    except Exception as e:  # noqa: BLE001
+        return f"⚠️ 自动建单·提交异常：{e}（请手动下单）"
+    if cp.get("status_code") != 0:
+        return f"⚠️ 自动建单·提交失败：{cp.get('msg')}（请手动下单）"
+    cd = cp.get("data") or {}
+    pay_url = (
+        cd.get("pay_url")
+        or cd.get("payment_url")
+        or cd.get("url")
+        or (cd.get("payment") or {}).get("url")
+    )
+    order_no = cd.get("order_no") or cd.get("order_id") or cd.get("id") or ""
+    if pay_url:
+        return f"✅ 已自动建单(订单{order_no}, 金额{total})，请尽快付款：\n{pay_url}"
+    return f"✅ 已自动建单(订单{order_no}, 金额{total})，但未取到付款直链，请用邮箱+订单密码到站点付款。"
 
 
 # ---------- 邮件 ----------
@@ -407,16 +527,30 @@ def main() -> int:
         except Exception as e:  # noqa: BLE001
             logger.error("站点4抓取失败，跳过：%s", e)
 
+    # 档位②：桃子商店有货且已开启自动建单 → 逐个新有货 SKU 建单取付款链接
+    autobuy_notes: list[str] = []
+    if TZ_AUTOBUY and s1_alerts:
+        for a in s1_alerts:
+            note = tz_autobuy(a)
+            if note:
+                logger.info("自动建单结果：%s", note.replace("\n", " "))
+                autobuy_notes.append(note)
+
     if s1_alerts or s2_alerts or s3_alerts or s4_alerts:
         subject, html_body, text_body = build_email(s1_alerts, s2_alerts, s3_alerts, s4_alerts)
+        if autobuy_notes:
+            text_body = "\n".join(autobuy_notes) + "\n\n" + text_body
+            html_body = "<p>" + "<br>".join(autobuy_notes).replace("\n", "<br>") + "</p>" + html_body
         send_email(subject, html_body, text_body)
+        notify_telegram(build_telegram(s1_alerts, s2_alerts, s3_alerts, s4_alerts, autobuy_notes))
     elif os.getenv("FORCE_SEND") == "1":
-        logger.info("FORCE_SEND=1：发送一封测试邮件")
+        logger.info("FORCE_SEND=1：发送测试邮件与 Telegram 推送")
         send_email(
             "【库存监控】测试邮件",
             "<p>这是一封测试邮件，说明监控脚本与邮件通道工作正常。</p>",
             "这是一封测试邮件，说明监控脚本与邮件通道工作正常。",
         )
+        notify_telegram("✅ 库存监控测试：脚本与 Telegram 推送通道正常。")
     else:
         logger.info("本轮无命中，不发邮件")
 

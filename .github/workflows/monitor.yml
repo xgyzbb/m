@@ -59,6 +59,14 @@ jobs:
           S2_LABEL: ${{ secrets.S2_LABEL }}
           S3_LABEL: ${{ secrets.S3_LABEL }}
           S4_LABEL: ${{ secrets.S4_LABEL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TZ_AUTOBUY: ${{ secrets.TZ_AUTOBUY }}
+          TZ_BUYER_EMAIL: ${{ secrets.TZ_BUYER_EMAIL }}
+          TZ_ORDER_PASSWORD: ${{ secrets.TZ_ORDER_PASSWORD }}
+          TZ_PAYMENT_CHANNEL: ${{ secrets.TZ_PAYMENT_CHANNEL }}
+          TZ_AUTOBUY_QTY: ${{ secrets.TZ_AUTOBUY_QTY }}
+          TZ_MAX_PRICE: ${{ secrets.TZ_MAX_PRICE }}
           FORCE_SEND_INPUT: ${{ github.event.inputs.force_send == 'true' && '1' || '0' }}
           ONCE_INPUT: ${{ github.event.inputs.once == 'true' && '1' || '0' }}
         run: |
