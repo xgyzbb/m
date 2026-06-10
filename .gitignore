@@ -1,0 +1,16 @@
+# 机密：本地 SMTP 配置，绝不提交
+.env
+
+# 计划文档（含路径等内部信息，不入仓库）
+监控方案-PLAN.md
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# 本地日志
+*.log
+
+# 本地一次性部署脚本（不入云端仓库）
+deploy-github.ps1

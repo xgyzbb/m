@@ -1,0 +1,72 @@
+name: m
+
+# 自循环长任务：单次运行内部每 5 分钟检查一次，约 5 小时后正常退出；
+# 由调度心跳/排队接力启动下一个长任务，从而绕过 GitHub 对 */5 定时的严重节流。
+on:
+  schedule:
+    - cron: '*/15 * * * *'   # 心跳：尽量多给“接力”机会（被节流也没关系，长任务覆盖期内只需有一次能排上队）
+  workflow_dispatch:
+    inputs:
+      force_send:
+        description: '无命中也发一封测试邮件（验证邮件通道）'
+        type: boolean
+        default: false
+
+# 同一时刻只允许一个长任务在跑；新触发的运行排队等待，结束后无缝接力（不取消进行中的）
+concurrency:
+  group: monitor
+  cancel-in-progress: false
+
+permissions:
+  contents: write            # 允许把 state.json 提交回仓库
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330     # 硬上限兜底（< GitHub 6h 限制）
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - run: pip install -r requirements.txt
+
+      - name: Monitor loop (every 5 min for ~5h)
+        env:
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USE_SSL: ${{ secrets.SMTP_USE_SSL }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+          S1_API: ${{ secrets.S1_API }}
+          S1_PAGE: ${{ secrets.S1_PAGE }}
+          S2_PAGE: ${{ secrets.S2_PAGE }}
+          S2_CATEGORY: ${{ secrets.S2_CATEGORY }}
+          S2_MIN_AMOUNT: ${{ secrets.S2_MIN_AMOUNT }}
+          S1_LABEL: ${{ secrets.S1_LABEL }}
+          S2_LABEL: ${{ secrets.S2_LABEL }}
+          FORCE_SEND_INPUT: ${{ github.event.inputs.force_send == 'true' && '1' || '0' }}
+        run: |
+          set -u
+          git config user.name "monitor-bot"
+          git config user.email "monitor-bot@users.noreply.github.com"
+          first=1
+          end=$(( $(date +%s) + 18000 ))   # 运行约 5 小时（18000 秒）
+          while [ "$(date +%s)" -lt "$end" ]; do
+            if [ "$first" = "1" ]; then export FORCE_SEND="$FORCE_SEND_INPUT"; else export FORCE_SEND=0; fi
+            python monitor.py || echo "monitor.py 本轮异常，已跳过"
+            first=0
+            # 仅在 state.json 真正变化时提交，避免提交噪声
+            if ! git diff --quiet -- state.json; then
+              git add state.json
+              git commit -m "update state [skip ci]" || true
+              git pull --rebase --autostash || true
+              git push || true
+            fi
+            sleep 300
+          done
+          echo "本次长任务正常结束，等待下一次接力。"

@@ -1,0 +1,6 @@
+# 强制 LF 行尾，避免在 Ubuntu (GitHub Actions) 上 bash/YAML 因 CRLF 报错
+* text=auto eol=lf
+*.py text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.txt text eol=lf
