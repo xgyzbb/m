@@ -6,6 +6,8 @@
 站点2：页面内嵌商品 JSON —— 面额 >= 阈值 的单品『有货』即提醒（忽略套餐 bundle）。
 站点3：服务端渲染页面的单选项 —— 面额 >= 阈值 的选项『有货』（无 disabled）即提醒。
 站点4：列表页 —— 页面上『出现』面额 >= 阈值 即提醒（按面额去重：消失后再出现会再报）。
+站点5：需登录的签名 JSON API（cookie + FNV 签名头）—— 任一规格有货即提醒。
+EXTRA_AMOUNTS：除 >=阈值 外额外关注的具体面额（如 7200），对站点2/3/4 生效。
 各站均按『售罄→有货』去重：有货才报一次，持续有货不重复；无命中静默不发。
 某站点抓取失败则跳过且不改写其状态（不误报）。
 
@@ -23,14 +25,17 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import smtplib
 import sys
+import time
 from datetime import datetime, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import formataddr
+from urllib.parse import urlparse
 
 import requests
 
@@ -75,10 +80,31 @@ S3_PAGE = os.getenv("S3_PAGE", "")
 S3_MIN_AMOUNT = _int_env("S3_MIN_AMOUNT", 10000)
 S4_PAGE = os.getenv("S4_PAGE", "")
 S4_MIN_AMOUNT = _int_env("S4_MIN_AMOUNT", 10000)
+# 站点5：需登录的签名 JSON API（cookie + FNV 签名头）；任一规格有货即提醒
+S5_API = os.getenv("S5_API", "")
+S5_PAGE = os.getenv("S5_PAGE", "")
+S5_COOKIE = os.getenv("S5_COOKIE", "")
+S5_SIGN_SALT = os.getenv("S5_SIGN_SALT", "")
+S5_UA = os.getenv("S5_UA", "") or (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
+)
 S1_LABEL = os.getenv("S1_LABEL", "站点1")
 S2_LABEL = os.getenv("S2_LABEL", "站点2")
 S3_LABEL = os.getenv("S3_LABEL", "站点3")
 S4_LABEL = os.getenv("S4_LABEL", "站点4")
+S5_LABEL = os.getenv("S5_LABEL", "站点5")
+
+# 额外关注的具体面额（除 ≥阈值 外也监控这些；逗号/空格分隔），对站点2/3/4 生效
+EXTRA_AMOUNTS = {
+    int(x) for x in re.split(r"[,\s]+", os.getenv("EXTRA_AMOUNTS", "")) if x.strip().isdigit()
+}
+
+
+def _amount_wanted(amount: int, min_amount: int) -> bool:
+    """面额达到阈值，或属于额外关注名单（如 7200），即需要监控。"""
+    return amount >= min_amount or amount in EXTRA_AMOUNTS
+
 
 # Telegram 推送（档位①）
 TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -193,7 +219,7 @@ def check_s2(prev_in_stock: list[int]) -> tuple[list[dict], list[int]]:
         if not m:
             continue
         amount = int(m.group(1).replace(",", ""))
-        if amount < S2_MIN_AMOUNT:
+        if not _amount_wanted(amount, S2_MIN_AMOUNT):
             continue
         count = int(d.get("card_count") or 0)
         if count > 0:
@@ -220,7 +246,7 @@ def check_s3(prev_in_stock: list[int]) -> tuple[list[dict], list[int]]:
         raise RuntimeError("站点3未解析到任何面额选项（页面结构可能已变化）")
     instock: dict[int, dict] = {}
     for oid, amount in amounts.items():
-        if amount < S3_MIN_AMOUNT:
+        if not _amount_wanted(amount, S3_MIN_AMOUNT):
             continue
         if disabled.get(oid, True):  # 找不到对应 input 时按售罄处理，避免误报
             continue
@@ -239,10 +265,60 @@ def check_s4(prev_present: list[int]) -> tuple[list[dict], list[int]]:
     if not amounts:
         # 正常情况下列表页至少有低面额商品；一个都解析不到多半是被拦截/改版
         raise RuntimeError("站点4未解析到任何面额（页面结构可能已变化或被拦截）")
-    present = sorted(a for a in amounts if a >= S4_MIN_AMOUNT)
+    present = sorted(a for a in amounts if _amount_wanted(a, S4_MIN_AMOUNT))
     prev = set(prev_present or [])
     new_alerts = [{"name": f"{a} NGN", "amount": a} for a in present if a not in prev]
     return new_alerts, present
+
+
+# ---------- 站点 5（需登录的签名 JSON API：任一规格有货）----------
+def _sign_fnv(ts: str, path: str, salt: str) -> str:
+    """复刻站点前端的 FNV-1a 签名（含 JS 的 ToInt32 带符号 + float64 乘法语义）。"""
+    s = f"{ts}:{path}:{salt}"
+    t = 0x811C9DC5
+    for ch in s:
+        bits = (t & 0xFFFFFFFF) ^ ord(ch)
+        signed = bits - 2**32 if bits >= 2**31 else bits  # JS 位运算的 ToInt32
+        t = math.trunc(0x1000193 * float(signed)) % (2**32)  # JS float 乘法 + >>>0
+    return format(t & 0xFFFFFFFF, "x")
+
+
+class _AuthError(RuntimeError):
+    """站点5 鉴权失败（cookie 失效）。"""
+
+
+def check_s5(prev_in_stock: list[str]) -> tuple[list[dict], list[str]]:
+    """返回 (新有货告警, 当前有货 variant_no 列表)。cookie 失效抛 _AuthError，其它失败抛异常。"""
+    path = urlparse(S5_API).path
+    ts = str(int(time.time() * 1000))
+    headers = {
+        "User-Agent": S5_UA,
+        "Cookie": S5_COOKIE,
+        "Referer": S5_PAGE or "",
+        "X-Timestamp": ts,
+        "X-Signature": _sign_fnv(ts, path, S5_SIGN_SALT),
+        "Accept": "application/json",
+    }
+    r = requests.get(S5_API, headers=headers, timeout=TIMEOUT)
+    if r.status_code in (401, 403) or "login?callbackUrl" in r.text[:500]:
+        raise _AuthError(f"S5 鉴权失败({r.status_code})，cookie 可能已失效")
+    r.raise_for_status()
+    body = r.json()
+    now: list[str] = []
+    detail: dict[str, dict] = {}
+    for v in body.get("variants") or []:
+        if not v.get("is_active"):
+            continue
+        if int(v.get("stock_count") or 0) > 0:  # 不限面额，任一规格有货即记
+            vno = v.get("variant_no") or v.get("title")
+            now.append(vno)
+            detail[vno] = {
+                "name": v.get("title"),
+                "price": v.get("price"),
+                "qty": int(v.get("stock_count") or 0),
+            }
+    prev = set(prev_in_stock or [])
+    return [detail[c] for c in now if c not in prev], now
 
 
 # ---------- Telegram 推送（档位①）----------
@@ -268,8 +344,14 @@ def notify_telegram(text: str) -> bool:
 
 
 def build_telegram(
-    s1: list[dict], s2: list[dict], s3: list[dict], s4: list[dict], extra_notes=None
+    s1: list[dict],
+    s2: list[dict],
+    s3: list[dict],
+    s4: list[dict],
+    extra_notes=None,
+    s5: list[dict] | None = None,
 ) -> str:
+    s5 = s5 or []
     L = ["🚨 库存提醒"]
     if s1:
         L.append(f"\n■ {S1_LABEL}（有货）")
@@ -291,6 +373,11 @@ def build_telegram(
         L += [f"• {a['amount']} NGN" for a in s4]
         if S4_PAGE:
             L.append(f"查看：{S4_PAGE}")
+    if s5:
+        L.append(f"\n■ {S5_LABEL}（有货）")
+        L += [f"• {a['name']}  价{a['price']}  库存{a['qty']}" for a in s5]
+        if S5_PAGE:
+            L.append(f"下单：{S5_PAGE}")
     for n in extra_notes or []:
         L.append("\n" + n)
     return "\n".join(L)
@@ -397,10 +484,14 @@ def build_email(
     s2_alerts: list[dict],
     s3_alerts: list[dict] | None = None,
     s4_alerts: list[dict] | None = None,
+    s5_alerts: list[dict] | None = None,
 ) -> tuple[str, str, str]:
     s3_alerts = s3_alerts or []
     s4_alerts = s4_alerts or []
-    n1, n2, n3, n4 = len(s1_alerts), len(s2_alerts), len(s3_alerts), len(s4_alerts)
+    s5_alerts = s5_alerts or []
+    n1, n2, n3, n4, n5 = (
+        len(s1_alerts), len(s2_alerts), len(s3_alerts), len(s4_alerts), len(s5_alerts)
+    )
     subj_bits = []
     if n1:
         subj_bits.append(f"{S1_LABEL} {n1} 个规格有货")
@@ -410,6 +501,8 @@ def build_email(
         subj_bits.append(f"{S3_LABEL} {n3} 个≥{S3_MIN_AMOUNT}有货")
     if n4:
         subj_bits.append(f"{S4_LABEL} 出现 {n4} 个≥{S4_MIN_AMOUNT}")
+    if n5:
+        subj_bits.append(f"{S5_LABEL} {n5} 个规格有货")
     subject = "【库存提醒】" + " / ".join(subj_bits)
 
     th, hh = [], []
@@ -478,6 +571,23 @@ def build_email(
         th += [f"  - {a['amount']} NGN" for a in s4_alerts]
         if S4_PAGE:
             th.append(f"  列表页：{S4_PAGE}")
+    if n5:
+        rows = "".join(
+            f"<tr><td>{a['name']}</td><td style='text-align:right'>{a['price']}</td>"
+            f"<td style='text-align:right'>{a['qty']}</td></tr>"
+            for a in s5_alerts
+        )
+        hh.append(
+            f"<h3>■ {S5_LABEL}（有货）</h3>"
+            "<table border='1' cellpadding='6' cellspacing='0' style='border-collapse:collapse'>"
+            "<tr><th>规格</th><th>价格</th><th>库存</th></tr>"
+            f"{rows}</table>"
+            + (f"<p>下单页：<a href='{S5_PAGE}'>{S5_PAGE}</a></p>" if S5_PAGE else "")
+        )
+        th.append(f"■ {S5_LABEL}（有货）：")
+        th += [f"  - {a['name']}  价 {a['price']}  库存 {a['qty']}" for a in s5_alerts]
+        if S5_PAGE:
+            th.append(f"  下单页：{S5_PAGE}")
 
     now = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S")
     th.append(f"\n（检测时间 {now}）")
@@ -543,6 +653,25 @@ def main() -> int:
         except Exception as e:  # noqa: BLE001
             logger.error("站点4抓取失败，跳过：%s", e)
 
+    s5_alerts: list[dict] = []
+    s5_now = state.get("s5_in_stock", [])
+    s5_ok = False
+    if S5_API and S5_COOKIE:
+        try:
+            s5_alerts, s5_now = check_s5(state.get("s5_in_stock", []))
+            s5_ok = True
+            logger.info("站点5：当前有货 %d 个，新有货 %d 个", len(s5_now), len(s5_alerts))
+            state.pop("s5_cookie_bad", None)  # 恢复正常 → 清除失效标记
+        except _AuthError as e:
+            logger.error("站点5鉴权失败：%s", e)
+            if not state.get("s5_cookie_bad"):
+                notify_telegram(
+                    f"⚠️ {S5_LABEL} 的登录 cookie 已失效，该站监控暂停。\n请重新登录取 cookie 发我更新。"
+                )
+                state["s5_cookie_bad"] = True
+        except Exception as e:  # noqa: BLE001
+            logger.error("站点5抓取失败，跳过：%s", e)
+
     # 档位②：桃子商店有货且已开启自动建单 → 逐个新有货 SKU 建单取付款链接
     autobuy_notes: list[str] = []
     if TZ_AUTOBUY and s1_alerts:
@@ -552,13 +681,17 @@ def main() -> int:
                 logger.info("自动建单结果：%s", note.replace("\n", " "))
                 autobuy_notes.append(note)
 
-    if s1_alerts or s2_alerts or s3_alerts or s4_alerts:
-        subject, html_body, text_body = build_email(s1_alerts, s2_alerts, s3_alerts, s4_alerts)
+    if s1_alerts or s2_alerts or s3_alerts or s4_alerts or s5_alerts:
+        subject, html_body, text_body = build_email(
+            s1_alerts, s2_alerts, s3_alerts, s4_alerts, s5_alerts
+        )
         if autobuy_notes:
             text_body = "\n".join(autobuy_notes) + "\n\n" + text_body
             html_body = "<p>" + "<br>".join(autobuy_notes).replace("\n", "<br>") + "</p>" + html_body
         send_email(subject, html_body, text_body)
-        notify_telegram(build_telegram(s1_alerts, s2_alerts, s3_alerts, s4_alerts, autobuy_notes))
+        notify_telegram(
+            build_telegram(s1_alerts, s2_alerts, s3_alerts, s4_alerts, autobuy_notes, s5_alerts)
+        )
     elif os.getenv("FORCE_SEND") == "1":
         logger.info("FORCE_SEND=1：发送测试邮件与 Telegram 推送")
         send_email(
@@ -578,6 +711,8 @@ def main() -> int:
         state["s3_in_stock"] = s3_now
     if s4_ok:
         state["s4_in_stock"] = s4_now
+    if s5_ok:
+        state["s5_in_stock"] = s5_now
     # 清理旧键/易变字段，保持 state.json 稳定（存活性看 Actions 运行记录）
     for k in ("last_run_utc", "tz_in_stock", "seagm_seen_single_ids"):
         state.pop(k, None)
