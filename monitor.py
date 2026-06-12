@@ -300,8 +300,17 @@ def check_s5(prev_in_stock: list[str]) -> tuple[list[dict], list[str]]:
         "Accept": "application/json",
     }
     r = requests.get(S5_API, headers=headers, timeout=TIMEOUT)
-    if r.status_code in (401, 403) or "login?callbackUrl" in r.text[:500]:
+    body_low = r.text[:600].lower()
+    # 仅当确为登录失效（登录跳转 / 401）才判 cookie 失效
+    if r.status_code == 401 or "login?callbackurl" in body_low:
         raise _AuthError(f"S5 鉴权失败({r.status_code})，cookie 可能已失效")
+    # Cloudflare 等对数据中心 IP 的拦截：不是 cookie 问题，单独区分
+    if r.status_code in (403, 503) and ("cloudflare" in body_low or "just a moment" in body_low
+                                        or "attention required" in body_low or "cf-mitigated" in r.headers):
+        raise RuntimeError(f"S5 被 Cloudflare 拦截(status={r.status_code})，疑似数据中心 IP 被封")
+    if r.status_code != 200:
+        snip = re.sub(r"\s+", " ", r.text[:200])
+        raise RuntimeError(f"S5 status={r.status_code} server={r.headers.get('server','')} body={snip}")
     r.raise_for_status()
     body = r.json()
     now: list[str] = []
