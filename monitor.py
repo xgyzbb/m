@@ -48,7 +48,7 @@ except Exception:  # noqa: BLE001
     pass
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-STATE_FILE = os.path.join(HERE, "state.json")
+STATE_FILE = os.getenv("STATE_FILE") or os.path.join(HERE, "state.json")
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
@@ -104,6 +104,14 @@ EXTRA_AMOUNTS = {
 def _amount_wanted(amount: int, min_amount: int) -> bool:
     """面额达到阈值，或属于额外关注名单（如 7200），即需要监控。"""
     return amount >= min_amount or amount in EXTRA_AMOUNTS
+
+
+# 只检查指定站点（如本机只跑 4,5；云端只跑 1,2,3）；为空=全部
+ONLY_SITES = {s for s in re.split(r"[,\s]+", os.getenv("ONLY_SITES", "")) if s.strip()}
+
+
+def _site_on(n: str) -> bool:
+    return (not ONLY_SITES) or n in ONLY_SITES
 
 
 # Telegram 推送（档位①）
@@ -609,37 +617,46 @@ def build_email(
 
 # ---------- 主流程 ----------
 def main() -> int:
+    handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout)]
+    log_file = os.getenv("LOG_FILE")
+    if log_file:  # 本机 pythonw 静默运行时用文件日志看心跳
+        try:
+            handlers.append(logging.FileHandler(log_file, encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            pass
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",
-        handlers=[logging.StreamHandler(sys.stdout)],
+        handlers=handlers,
     )
     state = load_state()
 
     s1_alerts: list[dict] = []
     s1_now = state.get("s1_in_stock", [])
     s1_ok = False
-    try:
-        s1_alerts, s1_now = check_s1(state.get("s1_in_stock", []))
-        s1_ok = True
-        logger.info("站点1：当前有货 %d 个，新有货 %d 个", len(s1_now), len(s1_alerts))
-    except Exception as e:  # noqa: BLE001
-        logger.error("站点1抓取失败，跳过：%s", e)
+    if _site_on("1"):
+        try:
+            s1_alerts, s1_now = check_s1(state.get("s1_in_stock", []))
+            s1_ok = True
+            logger.info("站点1：当前有货 %d 个，新有货 %d 个", len(s1_now), len(s1_alerts))
+        except Exception as e:  # noqa: BLE001
+            logger.error("站点1抓取失败，跳过：%s", e)
 
     s2_alerts: list[dict] = []
     s2_now = state.get("s2_in_stock", [])
     s2_ok = False
-    try:
-        s2_alerts, s2_now = check_s2(state.get("s2_in_stock", []))
-        s2_ok = True
-        logger.info("站点2：当前≥%d有货 %d 个，新有货 %d 个", S2_MIN_AMOUNT, len(s2_now), len(s2_alerts))
-    except Exception as e:  # noqa: BLE001
-        logger.error("站点2抓取失败，跳过：%s", e)
+    if _site_on("2"):
+        try:
+            s2_alerts, s2_now = check_s2(state.get("s2_in_stock", []))
+            s2_ok = True
+            logger.info("站点2：当前≥%d有货 %d 个，新有货 %d 个", S2_MIN_AMOUNT, len(s2_now), len(s2_alerts))
+        except Exception as e:  # noqa: BLE001
+            logger.error("站点2抓取失败，跳过：%s", e)
 
     s3_alerts: list[dict] = []
     s3_now = state.get("s3_in_stock", [])
     s3_ok = False
-    if S3_PAGE:
+    if _site_on("3") and S3_PAGE:
         try:
             s3_alerts, s3_now = check_s3(state.get("s3_in_stock", []))
             s3_ok = True
@@ -652,7 +669,7 @@ def main() -> int:
     s4_alerts: list[dict] = []
     s4_now = state.get("s4_in_stock", [])
     s4_ok = False
-    if S4_PAGE:
+    if _site_on("4") and S4_PAGE:
         try:
             s4_alerts, s4_now = check_s4(state.get("s4_in_stock", []))
             s4_ok = True
@@ -665,7 +682,7 @@ def main() -> int:
     s5_alerts: list[dict] = []
     s5_now = state.get("s5_in_stock", [])
     s5_ok = False
-    if S5_API and S5_COOKIE:
+    if _site_on("5") and S5_API and S5_COOKIE:
         try:
             s5_alerts, s5_now = check_s5(state.get("s5_in_stock", []))
             s5_ok = True

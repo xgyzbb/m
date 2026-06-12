@@ -14,3 +14,7 @@ __pycache__/
 
 # 本地一次性部署脚本（不入云端仓库）
 deploy-github.ps1
+
+# 本机定时跑 4/5 的启动器与独立状态（仅本机用，不入仓库）
+run_local.bat
+state_local.json
