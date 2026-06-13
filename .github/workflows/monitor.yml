@@ -60,7 +60,9 @@ jobs:
           S5_COOKIE: ${{ secrets.S5_COOKIE }}
           S5_SIGN_SALT: ${{ secrets.S5_SIGN_SALT }}
           S5_UA: ${{ secrets.S5_UA }}
-          EXTRA_AMOUNTS: ${{ secrets.EXTRA_AMOUNTS }}
+          S2_EXTRA_AMOUNTS: ${{ secrets.S2_EXTRA_AMOUNTS }}
+          S3_EXTRA_AMOUNTS: ${{ secrets.S3_EXTRA_AMOUNTS }}
+          S4_EXTRA_AMOUNTS: ${{ secrets.S4_EXTRA_AMOUNTS }}
           ONLY_SITES: ${{ secrets.ONLY_SITES }}
           S1_LABEL: ${{ secrets.S1_LABEL }}
           S2_LABEL: ${{ secrets.S2_LABEL }}

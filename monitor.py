@@ -7,7 +7,7 @@
 站点3：服务端渲染页面的单选项 —— 面额 >= 阈值 的选项『有货』（无 disabled）即提醒。
 站点4：列表页 —— 页面上『出现』面额 >= 阈值 即提醒（按面额去重：消失后再出现会再报）。
 站点5：需登录的签名 JSON API（cookie + FNV 签名头）—— 任一规格有货即提醒。
-EXTRA_AMOUNTS：除 >=阈值 外额外关注的具体面额（如 7200），对站点2/3/4 生效。
+S2/S3/S4_EXTRA_AMOUNTS：各站除 >=阈值 外额外关注的具体面额（如 7200/3600），逐站独立。
 各站均按『售罄→有货』去重：有货才报一次，持续有货不重复；无命中静默不发。
 某站点抓取失败则跳过且不改写其状态（不误报）。
 
@@ -95,15 +95,19 @@ S3_LABEL = os.getenv("S3_LABEL", "站点3")
 S4_LABEL = os.getenv("S4_LABEL", "站点4")
 S5_LABEL = os.getenv("S5_LABEL", "站点5")
 
-# 额外关注的具体面额（除 ≥阈值 外也监控这些；逗号/空格分隔），对站点2/3/4 生效
-EXTRA_AMOUNTS = {
-    int(x) for x in re.split(r"[,\s]+", os.getenv("EXTRA_AMOUNTS", "")) if x.strip().isdigit()
-}
+# 各站额外关注的具体面额（除 ≥阈值 外也监控这些；逗号分隔）。逐站独立，便于排除某站。
+def _amounts_env(name: str) -> set[int]:
+    return {int(x) for x in re.split(r"[,\s]+", os.getenv(name, "")) if x.strip().isdigit()}
 
 
-def _amount_wanted(amount: int, min_amount: int) -> bool:
-    """面额达到阈值，或属于额外关注名单（如 7200），即需要监控。"""
-    return amount >= min_amount or amount in EXTRA_AMOUNTS
+S2_EXTRA = _amounts_env("S2_EXTRA_AMOUNTS")  # SEAGM
+S3_EXTRA = _amounts_env("S3_EXTRA_AMOUNTS")  # Digiseller（不含 3600）
+S4_EXTRA = _amounts_env("S4_EXTRA_AMOUNTS")  # BuySellVouchers
+
+
+def _amount_wanted(amount: int, min_amount: int, extra: set[int]) -> bool:
+    """面额达到阈值，或属于该站额外关注名单（如 7200/3600），即需要监控。"""
+    return amount >= min_amount or amount in extra
 
 
 # 只检查指定站点（如本机只跑 4,5；云端只跑 1,2,3）；为空=全部
@@ -227,7 +231,7 @@ def check_s2(prev_in_stock: list[int]) -> tuple[list[dict], list[int]]:
         if not m:
             continue
         amount = int(m.group(1).replace(",", ""))
-        if not _amount_wanted(amount, S2_MIN_AMOUNT):
+        if not _amount_wanted(amount, S2_MIN_AMOUNT, S2_EXTRA):
             continue
         count = int(d.get("card_count") or 0)
         if count > 0:
@@ -254,7 +258,7 @@ def check_s3(prev_in_stock: list[int]) -> tuple[list[dict], list[int]]:
         raise RuntimeError("站点3未解析到任何面额选项（页面结构可能已变化）")
     instock: dict[int, dict] = {}
     for oid, amount in amounts.items():
-        if not _amount_wanted(amount, S3_MIN_AMOUNT):
+        if not _amount_wanted(amount, S3_MIN_AMOUNT, S3_EXTRA):
             continue
         if disabled.get(oid, True):  # 找不到对应 input 时按售罄处理，避免误报
             continue
@@ -273,7 +277,7 @@ def check_s4(prev_present: list[int]) -> tuple[list[dict], list[int]]:
     if not amounts:
         # 正常情况下列表页至少有低面额商品；一个都解析不到多半是被拦截/改版
         raise RuntimeError("站点4未解析到任何面额（页面结构可能已变化或被拦截）")
-    present = sorted(a for a in amounts if _amount_wanted(a, S4_MIN_AMOUNT))
+    present = sorted(a for a in amounts if _amount_wanted(a, S4_MIN_AMOUNT, S4_EXTRA))
     prev = set(prev_present or [])
     new_alerts = [{"name": f"{a} NGN", "amount": a} for a in present if a not in prev]
     return new_alerts, present
