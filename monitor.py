@@ -269,14 +269,50 @@ def check_s3(prev_in_stock: list[int]) -> tuple[list[dict], list[int]]:
 
 
 # ---------- 站点 4（列表页：出现 >=阈值 面额即报）----------
+_CF_MARKERS = ("just a moment", "attention required", "cf-challenge", "enable javascript and cookies")
+
+
+def _fetch_html_browser(url: str, timeout_ms: int = 30000) -> str | None:
+    """用 Playwright 无头 chromium 抓取（执行 JS、过 Cloudflare 挑战）。
+    不可用（未安装/失败）时返回 None，调用方退回普通请求。仅本机需要。"""
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception:  # noqa: BLE001 —— 云端未装 playwright
+        return None
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            try:
+                page = browser.new_page(user_agent=UA, locale="en-US")
+                page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+                try:  # 让 Cloudflare 挑战通过 + AJAX 商品渲染
+                    page.wait_for_load_state("networkidle", timeout=20000)
+                except Exception:  # noqa: BLE001
+                    pass
+                page.wait_for_timeout(2500)
+                return page.content()
+            finally:
+                browser.close()
+    except Exception as e:  # noqa: BLE001
+        logger.info("站点4 Playwright 抓取失败：%s", e)
+        return None
+
+
 def check_s4(prev_present: list[int]) -> tuple[list[dict], list[int]]:
-    """返回 (新出现的 >=阈值 面额告警, 当前页面上 >=阈值 的面额列表)。抓取/解析失败抛异常。"""
-    r = requests.get(S4_PAGE, headers={"User-Agent": UA}, timeout=TIMEOUT)
-    r.raise_for_status()
-    amounts = {int(m.group(1).replace(",", "")) for m in AMOUNT_RE.finditer(r.text)}
-    if not amounts:
-        # 正常情况下列表页至少有低面额商品；一个都解析不到多半是被拦截/改版
-        raise RuntimeError("站点4未解析到任何面额（页面结构可能已变化或被拦截）")
+    """返回 (新出现的 >=阈值 面额告警, 当前页面上 >=阈值 的面额列表)。抓取/拦截失败抛异常。"""
+    html = _fetch_html_browser(S4_PAGE)  # 本机：用浏览器过 Cloudflare
+    used_browser = html is not None
+    if not html:  # 云端/无 playwright：退回普通请求（best-effort）
+        r = requests.get(S4_PAGE, headers={"User-Agent": UA}, timeout=TIMEOUT)
+        r.raise_for_status()
+        html = r.text
+    low = html.lower()
+    if any(k in low for k in _CF_MARKERS):  # 仍是挑战/拦截页 → 抛错跳过，不误判为无货
+        raise RuntimeError("站点4被 Cloudflare 拦截，跳过本轮")
+    amounts = {int(m.group(1).replace(",", "")) for m in AMOUNT_RE.finditer(html)}
+    # 浏览器拿到真实页时，空 NGN = 当前确无 NGN 商品（正常，0 结果）；普通请求空 NGN 多半被挡 → 抛错
+    if not amounts and not used_browser:
+        raise RuntimeError("站点4未解析到任何面额（可能被拦截）")
     present = sorted(a for a in amounts if _amount_wanted(a, S4_MIN_AMOUNT, S4_EXCLUDE))
     prev = set(prev_present or [])
     new_alerts = [{"name": f"{a} NGN", "amount": a} for a in present if a not in prev]
