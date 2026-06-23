@@ -8,6 +8,7 @@
 __pycache__/
 *.pyc
 .venv/
+.venv-mac/
 
 # 本地日志
 *.log
@@ -20,3 +21,7 @@ run_local.bat
 run_local.ps1
 run_local.py
 state_local.json
+
+# 看门狗运行时文件（仅本机用，不入仓库）
+.heartbeat
+.watchdog-state
