@@ -122,6 +122,12 @@ def _site_on(n: str) -> bool:
 TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TG_CHAT = os.getenv("TELEGRAM_CHAT_ID", "")
 
+# ntfy.sh 紧急推送（档位①+）：有新增库存时手机无视静音/勿扰大声响铃。
+# 留空则不推送。手机装 ntfy app 订阅 NTFY_TOPIC 即可。
+NTFY_TOPIC = os.getenv("NTFY_TOPIC", "")                  # 随机频道名(公共频道无密码，别外泄)
+NTFY_SERVER = os.getenv("NTFY_SERVER", "https://ntfy.sh")
+NTFY_TITLE = os.getenv("NTFY_TITLE", "抢货啦抢货啦")        # 通知标题
+
 # 桃子商店自动建单（档位②，默认关闭，需显式开启 + 填邮箱/订单密码）
 TZ_AUTOBUY = os.getenv("TZ_AUTOBUY", "") == "1"
 TZ_BUYER_EMAIL = os.getenv("TZ_BUYER_EMAIL", "")
@@ -397,6 +403,52 @@ def notify_telegram(text: str) -> bool:
         return False
     except Exception as e:  # noqa: BLE001
         logger.error("Telegram 推送异常：%s", e)
+        return False
+
+
+# ---------- ntfy.sh 紧急推送（档位①+）----------
+def build_ntfy_body(s1, s2, s3, s4, s5) -> str:
+    """生成推送正文：只报哪些站点有货。"""
+    hits = []
+    if s1:
+        hits.append(S1_LABEL)
+    if s2:
+        hits.append(S2_LABEL)
+    if s3:
+        hits.append(S3_LABEL)
+    if s4:
+        hits.append(S4_LABEL)
+    if s5:
+        hits.append(S5_LABEL)
+    names = "、".join(hits) if hits else "监控站点"
+    return f"{names} 出现新增库存，快下单！"
+
+
+def notify_ntfy(body: str) -> bool:
+    """通过 ntfy.sh 发紧急推送（priority=5，无视静音/勿扰）。用 JSON 发布以正确支持中文。
+    任何失败都只记日志、不抛异常，确保不影响邮件/Telegram 通道。"""
+    if not NTFY_TOPIC:
+        logger.info("未配置 ntfy，跳过推送")
+        return False
+    try:
+        r = requests.post(
+            NTFY_SERVER,
+            json={
+                "topic": NTFY_TOPIC,
+                "title": NTFY_TITLE,
+                "message": body,
+                "priority": 5,
+                "tags": ["rotating_light"],
+            },
+            timeout=TIMEOUT,
+        )
+        if r.ok:
+            logger.info("ntfy 已推送")
+            return True
+        logger.error("ntfy 推送失败：HTTP %s %s", r.status_code, r.text[:200])
+        return False
+    except Exception as e:  # noqa: BLE001
+        logger.error("ntfy 推送异常：%s", e)
         return False
 
 
@@ -758,6 +810,7 @@ def main() -> int:
         notify_telegram(
             build_telegram(s1_alerts, s2_alerts, s3_alerts, s4_alerts, autobuy_notes, s5_alerts)
         )
+        notify_ntfy(build_ntfy_body(s1_alerts, s2_alerts, s3_alerts, s4_alerts, s5_alerts))
     elif os.getenv("FORCE_SEND") == "1":
         logger.info("FORCE_SEND=1：发送测试邮件与 Telegram 推送")
         send_email(
