@@ -52,6 +52,15 @@ if [ "$age" -gt "$THRESHOLD" ]; then
   if [ "$prev" != "down" ]; then
     mins=$(( age / 60 ))
     log "检测到停止：已 ${age}s（约 ${mins} 分钟）无成功心跳，阈值 ${THRESHOLD}s"
+    # 夜间休眠常把跑到一半的进程杀掉、清理 trap 来不及执行 → 残留“僵死锁”，
+    # 会让重启后的新进程继续空转。这里先把“持有者已死”的锁清掉，确保唤醒后能真正恢复。
+    LOCK_DIR="$MONITOR_DIR/.mac-launchd.lock"
+    if [ -d "$LOCK_DIR" ]; then
+      lpid=$(cat "$LOCK_DIR/pid" 2>/dev/null)
+      if [ -z "$lpid" ] || ! kill -0 "$lpid" 2>/dev/null; then
+        rm -rf "$LOCK_DIR" && log "已清除僵死锁（pid=${lpid:-none}），便于重启后立即恢复"
+      fi
+    fi
     action="未自动重启"
     if [ "$AUTO_RESTART" -eq 1 ]; then
       if launchctl kickstart -k "gui/$(id -u)/${LABEL}" 2>>"$LOG"; then
