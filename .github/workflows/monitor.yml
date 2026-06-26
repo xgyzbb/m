@@ -60,6 +60,8 @@ jobs:
           S5_COOKIE: ${{ secrets.S5_COOKIE }}
           S5_SIGN_SALT: ${{ secrets.S5_SIGN_SALT }}
           S5_UA: ${{ secrets.S5_UA }}
+          S6_PAGE: ${{ secrets.S6_PAGE }}
+          S6_KEYWORD: ${{ secrets.S6_KEYWORD }}
           S2_EXCLUDE_AMOUNTS: ${{ secrets.S2_EXCLUDE_AMOUNTS }}
           S3_EXCLUDE_AMOUNTS: ${{ secrets.S3_EXCLUDE_AMOUNTS }}
           S4_EXCLUDE_AMOUNTS: ${{ secrets.S4_EXCLUDE_AMOUNTS }}
@@ -69,6 +71,7 @@ jobs:
           S3_LABEL: ${{ secrets.S3_LABEL }}
           S4_LABEL: ${{ secrets.S4_LABEL }}
           S5_LABEL: ${{ secrets.S5_LABEL }}
+          S6_LABEL: ${{ secrets.S6_LABEL }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TZ_AUTOBUY: ${{ secrets.TZ_AUTOBUY }}

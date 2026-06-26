@@ -7,6 +7,7 @@
 站点3：服务端渲染页面的单选项 —— 面额 >= 阈值 的选项『有货』（无 disabled）即提醒。
 站点4：列表页 —— 页面上『出现』面额 >= 阈值 即提醒（按面额去重：消失后再出现会再报）。
 站点5：需登录的签名 JSON API（cookie + FNV 签名头）—— 任一规格有货即提醒。
+站点6：mtcgame 国家列表（Next.js 内嵌 JSON）—— 出现含关键词(默认 Nigeria)的『新选项』即提醒。
 S2/S3/S4_EXCLUDE_AMOUNTS：各站即使 ≥阈值 也排除的面额（如 Digiseller 排除 9900），逐站独立。
 各站均按『售罄→有货』去重：有货才报一次，持续有货不重复；无命中静默不发。
 某站点抓取失败则跳过且不改写其状态（不误报）。
@@ -16,6 +17,7 @@ S2/S3/S4_EXCLUDE_AMOUNTS：各站即使 ≥阈值 也排除的面额（如 Digis
   Telegram(档位①推送)：TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID
   目标：S1_API S1_PAGE S2_PAGE S2_CATEGORY [S2_MIN_AMOUNT=10000] S3_PAGE [S3_MIN_AMOUNT=10000]
         S4_PAGE [S4_MIN_AMOUNT=10000]
+        站点6：S6_PAGE [S6_KEYWORD=nigeria] [S6_LABEL=站点6]
   标签：[S1_LABEL=站点1] [S2_LABEL=站点2] [S3_LABEL=站点3] [S4_LABEL=站点4]
   档位②(桃子商店自动建单，默认关闭)：TZ_AUTOBUY=1 TZ_BUYER_EMAIL TZ_ORDER_PASSWORD
         [TZ_PAYMENT_CHANNEL] [TZ_AUTOBUY_QTY=1] [TZ_MAX_PRICE=0(不限)]
@@ -89,11 +91,15 @@ S5_UA = os.getenv("S5_UA", "") or (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
 )
+# 站点6：mtcgame 国家列表；出现含关键词(默认 Nigeria)的新选项即提醒（不限面额/库存）
+S6_PAGE = os.getenv("S6_PAGE", "")
+S6_KEYWORD = os.getenv("S6_KEYWORD", "nigeria")
 S1_LABEL = os.getenv("S1_LABEL", "站点1")
 S2_LABEL = os.getenv("S2_LABEL", "站点2")
 S3_LABEL = os.getenv("S3_LABEL", "站点3")
 S4_LABEL = os.getenv("S4_LABEL", "站点4")
 S5_LABEL = os.getenv("S5_LABEL", "站点5")
+S6_LABEL = os.getenv("S6_LABEL", "站点6")
 
 # 各站排除的具体面额（即使 ≥阈值 也不提醒；逗号分隔）。逐站独立。
 def _amounts_env(name: str) -> set[int]:
@@ -384,6 +390,79 @@ def check_s5(prev_in_stock: list[str]) -> tuple[list[dict], list[str]]:
     return [detail[c] for c in now if c not in prev], now
 
 
+# ---------- 站点 6（mtcgame 国家列表：出现含关键词的新选项）----------
+_S6_NEXT_RE = re.compile(
+    r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', re.S | re.I
+)
+
+
+def _mtc_store_url(seo: str) -> str:
+    """由 seoName 拼出 mtcgame 商品页直链（如 itunes/gift-card-us → /itunes/gift-card-us）。"""
+    if not seo:
+        return S6_PAGE
+    base = "https://www.mtcgame.com"
+    return f"{base}/{seo.lstrip('/')}"
+
+
+def check_s6(prev_seen: list[str]) -> tuple[list[dict], list[str]]:
+    """mtcgame 国家列表：出现含关键词(默认 Nigeria)的『新选项』即提醒。
+    返回 (新出现的选项告警, 当前命中选项的标识列表)。抓取/解析失败抛异常（跳过本轮，不误报）。"""
+    r = requests.get(S6_PAGE, headers={"User-Agent": UA}, timeout=TIMEOUT)
+    r.raise_for_status()
+    html = r.text
+    kw = S6_KEYWORD.strip().lower()
+    hits: dict[str, dict] = {}
+    parsed = False
+    m = _S6_NEXT_RE.search(html)
+    if m:
+        try:
+            data = json.loads(m.group(1))
+            cats = (
+                (((data.get("props") or {}).get("pageProps") or {}).get("data") or {})
+                .get("gameCategory")
+                or []
+            )
+            if cats:  # 成功拿到分类列表才算解析成功（空列表视为结构异常，走兜底）
+                parsed = True
+                for it in cats:
+                    if not isinstance(it, dict):
+                        continue
+                    name = (it.get("name") or "").strip()
+                    seo = (it.get("seoName") or "").strip()
+                    flag = (it.get("flagCode") or "").strip().lower()
+                    blob = f"{name} {seo} {flag}".lower()
+                    # 关键词命中，或国家旗标为尼日利亚(ng)
+                    if kw in blob or (kw == "nigeria" and flag == "ng"):
+                        key = seo or name or flag
+                        hits[key] = {
+                            "name": name or key,
+                            "seo": seo,
+                            "flag": flag,
+                            "url": _mtc_store_url(seo),
+                        }
+        except Exception:  # noqa: BLE001 —— JSON 结构变化时解析失败 → 走兜底
+            parsed = False
+    if not parsed:
+        # 兜底：拿不到分类列表时退回全页文本搜索（至少能报出现）
+        if kw in html.lower():
+            hits["__raw__"] = {
+                "name": f"{S6_KEYWORD}（页面文本命中，列表结构已变请人工确认）",
+                "seo": "",
+                "flag": "",
+                "url": S6_PAGE,
+            }
+        elif any(k in html.lower() for k in _CF_MARKERS):
+            # 数据中心IP（如云端）常被 Cloudflare 挑战拦截 → 明确报出，便于排查
+            raise RuntimeError("站点6被 Cloudflare 拦截，跳过本轮（多为数据中心IP）")
+        else:
+            # 既没解析到列表、也没命中关键词 → 结构未知，抛错跳过，避免静默漏报
+            raise RuntimeError("站点6未解析到国家列表（页面结构可能已变化）")
+    now = sorted(hits.keys())
+    prev = set(prev_seen or [])
+    new_alerts = [{"key": k, **hits[k]} for k in now if k not in prev]
+    return new_alerts, now
+
+
 # ---------- Telegram 推送（档位①）----------
 def notify_telegram(text: str) -> bool:
     """纯文本发送（不用 parse_mode，URL 由 Telegram 自动识别为链接，避免转义出错）。"""
@@ -407,8 +486,8 @@ def notify_telegram(text: str) -> bool:
 
 
 # ---------- ntfy.sh 紧急推送（档位①+）----------
-def build_ntfy_body(s1, s2, s3, s4, s5) -> str:
-    """生成推送正文：只报哪些站点有货。"""
+def build_ntfy_body(s1, s2, s3, s4, s5, s6=None) -> str:
+    """生成推送正文：只报哪些站点有货/有新选项。"""
     hits = []
     if s1:
         hits.append(S1_LABEL)
@@ -420,6 +499,13 @@ def build_ntfy_body(s1, s2, s3, s4, s5) -> str:
         hits.append(S4_LABEL)
     if s5:
         hits.append(S5_LABEL)
+    if s6:
+        # 站点6是“选项出现”而非补货，单独成句更贴切
+        names6 = "、".join(a.get("name", S6_LABEL) for a in s6)
+        head = f"{S6_LABEL} 出现 {S6_KEYWORD} 选项（{names6}）"
+        if not (s1 or s2 or s3 or s4 or s5):
+            return head + "，快去看！"
+        hits.append(S6_LABEL)
     names = "、".join(hits) if hits else "监控站点"
     return f"{names} 出现新增库存，快下单！"
 
@@ -459,8 +545,10 @@ def build_telegram(
     s4: list[dict],
     extra_notes=None,
     s5: list[dict] | None = None,
+    s6: list[dict] | None = None,
 ) -> str:
     s5 = s5 or []
+    s6 = s6 or []
     L = ["🚨 库存提醒"]
     if s1:
         L.append(f"\n■ {S1_LABEL}（有货）")
@@ -487,6 +575,14 @@ def build_telegram(
         L += [f"• {a['name']}  价{a['price']}  库存{a['qty']}" for a in s5]
         if S5_PAGE:
             L.append(f"下单：{S5_PAGE}")
+    if s6:
+        L.append(f"\n■ {S6_LABEL}（出现 {S6_KEYWORD} 选项）")
+        for a in s6:
+            L.append(f"• {a.get('name')}")
+            if a.get("url"):
+                L.append(f"  {a['url']}")
+        if S6_PAGE:
+            L.append(f"列表页：{S6_PAGE}")
     for n in extra_notes or []:
         L.append("\n" + n)
     return "\n".join(L)
@@ -594,12 +690,15 @@ def build_email(
     s3_alerts: list[dict] | None = None,
     s4_alerts: list[dict] | None = None,
     s5_alerts: list[dict] | None = None,
+    s6_alerts: list[dict] | None = None,
 ) -> tuple[str, str, str]:
     s3_alerts = s3_alerts or []
     s4_alerts = s4_alerts or []
     s5_alerts = s5_alerts or []
-    n1, n2, n3, n4, n5 = (
-        len(s1_alerts), len(s2_alerts), len(s3_alerts), len(s4_alerts), len(s5_alerts)
+    s6_alerts = s6_alerts or []
+    n1, n2, n3, n4, n5, n6 = (
+        len(s1_alerts), len(s2_alerts), len(s3_alerts), len(s4_alerts),
+        len(s5_alerts), len(s6_alerts),
     )
     subj_bits = []
     if n1:
@@ -612,6 +711,8 @@ def build_email(
         subj_bits.append(f"{S4_LABEL} 出现 {n4} 个≥{S4_MIN_AMOUNT}")
     if n5:
         subj_bits.append(f"{S5_LABEL} {n5} 个规格有货")
+    if n6:
+        subj_bits.append(f"{S6_LABEL} 出现 {n6} 个 {S6_KEYWORD} 选项")
     subject = "【库存提醒】" + " / ".join(subj_bits)
 
     th, hh = [], []
@@ -697,6 +798,23 @@ def build_email(
         th += [f"  - {a['name']}  价 {a['price']}  库存 {a['qty']}" for a in s5_alerts]
         if S5_PAGE:
             th.append(f"  下单页：{S5_PAGE}")
+    if n6:
+        rows = "".join(
+            f"<tr><td>{a.get('name')}</td>"
+            f"<td><a href='{a.get('url') or S6_PAGE}'>{a.get('url') or S6_PAGE}</a></td></tr>"
+            for a in s6_alerts
+        )
+        hh.append(
+            f"<h3>■ {S6_LABEL}（出现 {S6_KEYWORD} 选项）</h3>"
+            "<table border='1' cellpadding='6' cellspacing='0' style='border-collapse:collapse'>"
+            "<tr><th>选项</th><th>直达链接</th></tr>"
+            f"{rows}</table>"
+            + (f"<p>列表页：<a href='{S6_PAGE}'>{S6_PAGE}</a></p>" if S6_PAGE else "")
+        )
+        th.append(f"■ {S6_LABEL}（出现 {S6_KEYWORD} 选项）：")
+        th += [f"  - {a.get('name')}  {a.get('url') or ''}".rstrip() for a in s6_alerts]
+        if S6_PAGE:
+            th.append(f"  列表页：{S6_PAGE}")
 
     now = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S")
     th.append(f"\n（检测时间 {now}）")
@@ -790,6 +908,20 @@ def main() -> int:
         except Exception as e:  # noqa: BLE001
             logger.error("站点5抓取失败，跳过：%s", e)
 
+    s6_alerts: list[dict] = []
+    s6_now = state.get("s6_seen", [])
+    s6_ok = False
+    if _site_on("6") and S6_PAGE:
+        try:
+            s6_alerts, s6_now = check_s6(state.get("s6_seen", []))
+            s6_ok = True
+            logger.info(
+                "站点6：当前命中 %s 选项 %d 个，新出现 %d 个",
+                S6_KEYWORD, len(s6_now), len(s6_alerts),
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.error("站点6抓取失败，跳过：%s", e)
+
     # 档位②：桃子商店有货且已开启自动建单 → 逐个新有货 SKU 建单取付款链接
     autobuy_notes: list[str] = []
     if TZ_AUTOBUY and s1_alerts:
@@ -799,18 +931,22 @@ def main() -> int:
                 logger.info("自动建单结果：%s", note.replace("\n", " "))
                 autobuy_notes.append(note)
 
-    if s1_alerts or s2_alerts or s3_alerts or s4_alerts or s5_alerts:
+    if s1_alerts or s2_alerts or s3_alerts or s4_alerts or s5_alerts or s6_alerts:
         subject, html_body, text_body = build_email(
-            s1_alerts, s2_alerts, s3_alerts, s4_alerts, s5_alerts
+            s1_alerts, s2_alerts, s3_alerts, s4_alerts, s5_alerts, s6_alerts
         )
         if autobuy_notes:
             text_body = "\n".join(autobuy_notes) + "\n\n" + text_body
             html_body = "<p>" + "<br>".join(autobuy_notes).replace("\n", "<br>") + "</p>" + html_body
         send_email(subject, html_body, text_body)
         notify_telegram(
-            build_telegram(s1_alerts, s2_alerts, s3_alerts, s4_alerts, autobuy_notes, s5_alerts)
+            build_telegram(
+                s1_alerts, s2_alerts, s3_alerts, s4_alerts, autobuy_notes, s5_alerts, s6_alerts
+            )
         )
-        notify_ntfy(build_ntfy_body(s1_alerts, s2_alerts, s3_alerts, s4_alerts, s5_alerts))
+        notify_ntfy(
+            build_ntfy_body(s1_alerts, s2_alerts, s3_alerts, s4_alerts, s5_alerts, s6_alerts)
+        )
     elif os.getenv("FORCE_SEND") == "1":
         logger.info("FORCE_SEND=1：发送测试邮件与 Telegram 推送")
         send_email(
@@ -832,6 +968,8 @@ def main() -> int:
         state["s4_in_stock"] = s4_now
     if s5_ok:
         state["s5_in_stock"] = s5_now
+    if s6_ok:
+        state["s6_seen"] = s6_now
     # 清理旧键/易变字段，保持 state.json 稳定（存活性看 Actions 运行记录）
     for k in ("last_run_utc", "tz_in_stock", "seagm_seen_single_ids"):
         state.pop(k, None)
