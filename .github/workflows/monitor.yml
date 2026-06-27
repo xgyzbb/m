@@ -62,6 +62,8 @@ jobs:
           S5_UA: ${{ secrets.S5_UA }}
           S6_PAGE: ${{ secrets.S6_PAGE }}
           S6_KEYWORD: ${{ secrets.S6_KEYWORD }}
+          S7_PAGE: ${{ secrets.S7_PAGE }}
+          S7_OOS_STOCK: ${{ secrets.S7_OOS_STOCK }}
           S2_EXCLUDE_AMOUNTS: ${{ secrets.S2_EXCLUDE_AMOUNTS }}
           S3_EXCLUDE_AMOUNTS: ${{ secrets.S3_EXCLUDE_AMOUNTS }}
           S4_EXCLUDE_AMOUNTS: ${{ secrets.S4_EXCLUDE_AMOUNTS }}
@@ -72,6 +74,7 @@ jobs:
           S4_LABEL: ${{ secrets.S4_LABEL }}
           S5_LABEL: ${{ secrets.S5_LABEL }}
           S6_LABEL: ${{ secrets.S6_LABEL }}
+          S7_LABEL: ${{ secrets.S7_LABEL }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TZ_AUTOBUY: ${{ secrets.TZ_AUTOBUY }}
