@@ -1,6 +1,8 @@
 {
   "s1_in_stock": [],
-  "s2_in_stock": [],
+  "s2_in_stock": [
+    28641
+  ],
   "s3_in_stock": [],
   "s4_in_stock": [],
   "s5_in_stock": [],
