@@ -37,6 +37,12 @@ jobs:
 
       - run: pip install -r requirements.txt
 
+      # 站点4 需要真实浏览器过 Cloudflare 挑战；装不上也不致命（monitor.py 会自动退回普通请求）
+      - name: Install Playwright Chromium (for site 4)
+        run: |
+          pip install playwright
+          playwright install --with-deps chromium
+
       - name: Monitor loop (every 5 min for ~5h)
         env:
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
@@ -77,6 +83,9 @@ jobs:
           S7_LABEL: ${{ secrets.S7_LABEL }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          NTFY_SERVER: ${{ secrets.NTFY_SERVER }}
+          NTFY_TITLE: ${{ secrets.NTFY_TITLE }}
           TZ_AUTOBUY: ${{ secrets.TZ_AUTOBUY }}
           TZ_BUYER_EMAIL: ${{ secrets.TZ_BUYER_EMAIL }}
           TZ_ORDER_PASSWORD: ${{ secrets.TZ_ORDER_PASSWORD }}
