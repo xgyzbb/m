@@ -3,7 +3,9 @@
   "s2_in_stock": [],
   "s3_in_stock": [],
   "s4_in_stock": [
-    14900
+    14900,
+    25000,
+    100000
   ],
   "s5_in_stock": [],
   "s6_seen": []
