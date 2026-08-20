@@ -1,0 +1,68 @@
+name: Telegram Notify
+
+on:
+  workflow_dispatch:
+    inputs:
+      message:
+        description: Plain-text message to send
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Send Telegram message
+        shell: python
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_MESSAGE: ${{ inputs.message }}
+        run: |
+          import json
+          import os
+          import urllib.error
+          import urllib.request
+
+          token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+          chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
+          message = os.environ.get("TELEGRAM_MESSAGE", "")
+
+          missing = [
+              name
+              for name, value in (
+                  ("TELEGRAM_BOT_TOKEN", token),
+                  ("TELEGRAM_CHAT_ID", chat_id),
+                  ("TELEGRAM_MESSAGE", message),
+              )
+              if not value
+          ]
+          if missing:
+              raise SystemExit("Missing required value: " + ", ".join(missing))
+
+          payload = json.dumps(
+              {"chat_id": chat_id, "text": message},
+              ensure_ascii=False,
+          ).encode("utf-8")
+          request = urllib.request.Request(
+              f"https://api.telegram.org/bot{token}/sendMessage",
+              data=payload,
+              headers={"Content-Type": "application/json"},
+              method="POST",
+          )
+
+          try:
+              with urllib.request.urlopen(request, timeout=20) as response:
+                  result = json.load(response)
+          except urllib.error.HTTPError as exc:
+              raise SystemExit(
+                  f"Telegram request failed with HTTP {exc.code}"
+              ) from None
+
+          if not result.get("ok"):
+              raise SystemExit("Telegram API returned ok=false")
+          print("Telegram notification sent")
