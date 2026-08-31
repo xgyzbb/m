@@ -1,0 +1,75 @@
+name: VDS Health Monitor
+
+on:
+  schedule:
+    - cron: '7,22,37,52 * * * *'
+  workflow_dispatch:
+    inputs:
+      force_notify:
+        description: Send a Telegram status message on the first check
+        type: boolean
+        default: false
+      once:
+        description: Run one check instead of the five-hour loop
+        type: boolean
+        default: false
+
+concurrency:
+  group: vds-health-monitor
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare restricted SSH identity
+        env:
+          VDS_MONITOR_SSH_KEY: ${{ secrets.VDS_MONITOR_SSH_KEY }}
+          VDS_MONITOR_KNOWN_HOSTS: ${{ secrets.VDS_MONITOR_KNOWN_HOSTS }}
+        run: |
+          umask 077
+          mkdir -p "$RUNNER_TEMP/vds-health"
+          printf '%s\n' "$VDS_MONITOR_SSH_KEY" > "$RUNNER_TEMP/vds-health/id_ed25519"
+          printf '%s\n' "$VDS_MONITOR_KNOWN_HOSTS" > "$RUNNER_TEMP/vds-health/known_hosts"
+
+      - name: Monitor every five minutes
+        env:
+          VDS_HOST: ${{ secrets.VDS_MONITOR_HOST }}
+          VDS_SSH_PORT: ${{ secrets.VDS_MONITOR_SSH_PORT }}
+          VDS_PROXY_PORT: '23845'
+          VDS_KEY_PATH: ${{ runner.temp }}/vds-health/id_ed25519
+          VDS_KNOWN_HOSTS_PATH: ${{ runner.temp }}/vds-health/known_hosts
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          FORCE_NOTIFY_INPUT: ${{ github.event.inputs.force_notify == 'true' && '1' || '0' }}
+          ONCE_INPUT: ${{ github.event.inputs.once == 'true' && '1' || '0' }}
+        run: |
+          git config user.name "vds-health-monitor"
+          git config user.email "vds-health-monitor@users.noreply.github.com"
+          first=1
+          end=$(( $(date +%s) + 18000 ))
+          while [ "$(date +%s)" -lt "$end" ]; do
+            if [ "$first" = "1" ]; then
+              export FORCE_NOTIFY="$FORCE_NOTIFY_INPUT"
+            else
+              export FORCE_NOTIFY=0
+            fi
+            python3 .github/scripts/vds_health_monitor.py || echo "VDS monitor check failed"
+            first=0
+            if ! git diff --quiet -- .github/vds-health-state.json; then
+              git add .github/vds-health-state.json
+              git commit -m "update VDS health state [skip ci]" || true
+              git pull --rebase --autostash || true
+              git push || true
+            fi
+            if [ "${ONCE_INPUT:-0}" = "1" ]; then
+              break
+            fi
+            sleep 300
+          done
